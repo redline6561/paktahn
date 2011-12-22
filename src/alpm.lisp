@@ -1,7 +1,8 @@
 (in-package :pak)
 
 (define-foreign-library libalpm
-  (:unix (:or "libalpm.so.6" "libalpm.so.5" "libalpm.so.3" "libalpm.so"))
+  (:unix (:or "libalpm.so.7" "libalpm.so.6"
+              "libalpm.so.5" "libalpm.so.3" "libalpm.so"))
   (t (:default "libalpm")))
 
 (use-foreign-library libalpm)
@@ -10,7 +11,7 @@
 
 (defvar *alpm-version*
   (mapcar #'parse-integer (split-sequence:split-sequence #\. (alpm-version)))
-  "A list of the form (Major minor point) representing the libalmp version.")
+  "A list of the form (Major minor point) representing the libalpm version.")
 
 ;;; versioning
 (defcfun "alpm_pkg_vercmp" :int (v1 :string) (v2 :string))
@@ -51,16 +52,36 @@
           collect (alpm-list-getdata iter)))
 
 ;;; main alpm
-(defcfun "alpm_initialize" :int)
-(defcfun "alpm_option_set_root" :int (root :string))
-(defcfun "alpm_option_set_dbpath" :int (root :string))
+(case *alpm-version*
+  (7 (defcfun "alpm_initialize" :int
+       (root :string)
+       (db-path :string)))
+  (otherwise
+   (defcfun "alpm_initialize" :int)
+   (defcfun "alpm_option_set_root" :int (root :string))
+   (defcfun "alpm_option_set_dbpath" :int (root :string))))
 
-(if (>= (car *alpm-version*) 6)
-    (defcfun ("alpm_option_get_localdb" alpm-option-get-localdb) :pointer)
-    (defcfun ("alpm_db_register_local" alpm-db-register-local) :pointer))
+(when (= 7 *alpm-version*)
+  (defcfun ("alpm_option_get_default_siglevel" get-default-siglevel) :int)
+  (defcfun ("alpm_db_get_siglevel" get-db-siglevel) :int (db :pointer)))
 
-(defcfun "alpm_db_register_sync" :pointer (name :string))
+(case *alpm-version*
+  (7 (load-7))
+  ;; TODO: update option-get-localdb for handle-t
+  (6 (defcfun ("alpm_option_get_localdb" alpm-option-get-localdb) :pointer))
+  (otherwise (defcfun ("alpm_db_register_local" alpm-db-register-local) :pointer)))
 
+(case *alpm-version*
+  (7
+   ;; TODO: Also needs a handle-t
+   (defcfun ("alpm_db_register_sync" %db-register-sync) :pointer
+     (name :string)
+     (siglevel :int))
+   (defun alpm-db-register-sync (name &optional (siglevel (alpm-option-get-default-siglevel)))
+     (%db-register-sync name siglevel)))
+  (6 (defcfun "alpm_db_register_sync" :pointer (name :string))))
+
+;; update unregister_all for handle-t
 (defcfun "alpm_db_unregister_all" :int)
 (defcfun "alpm_db_unregister" :int (db :pointer))
 
@@ -71,9 +92,12 @@
                  *sync-dbs*)))
 
 (defun init-alpm ()
-  (alpm-initialize)
-  (alpm-option-set-root "/")
-  (alpm-option-set-dbpath "/var/lib/pacman"))
+  (case *alpm-version*
+    (7 (alpm-initialize "/" "/var/lib/pacman"))
+    (otherwise
+     (alpm-initialize)
+     (alpm-option-set-root "/")
+     (alpm-option-set-dbpath "/var/lib/pacman"))))
 
 (init-alpm)
 
@@ -94,9 +118,10 @@
                 :test #'equalp))
 
 (defun init-local-db ()
-  (if (>= (car *alpm-version*) 6)
-      (cons "local" (alpm-option-get-localdb))
-      (cons "local" (alpm-db-register-local))))
+  (case *alpm-version*
+    (7 (do-7))
+    (6 (cons "local" (alpm-option-get-localdb)))
+    (otherwise (cons "local" (alpm-db-register-local)))))
 
 (defun init-sync-dbs ()
   (mapcar (lambda (name)
